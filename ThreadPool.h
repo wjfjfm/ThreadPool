@@ -4,6 +4,7 @@
 #include <deque>
 #include <vector>
 #include <memory>
+#include <iostream>
 
 class ThreadPool {
  public:
@@ -19,27 +20,38 @@ class ThreadPool {
     std::mutex task_mutex;
     std::condition_variable cv;
     bool closed;
+    int count;
 };
 
-ThreadPool::ThreadPool(int worker) : closed(false){
+ThreadPool::ThreadPool(int worker) : closed(false), count(0){
     workers.reserve(worker);
     for(int i=0; i<worker; i++) {
         workers.emplace_back(
             [this]{
+                // std::cout << "worker waiting for init" << std::endl;
                 std::unique_lock<std::mutex> lock(this->task_mutex);
-                while(!this->closed) {
-                    this->cv.wait(lock);
-                    if (!tasks.empty()) {
-                        auto task = this->tasks.front();
-                        this->tasks.pop_front();
-                        lock.unlock();
-                        task();
+                // int thread_count = ++this->count;
+                // std::cout << "worker " << thread_count << " started" << std::endl;
+                while(true) {
+                    while (this->tasks.empty()) {
+                        if (this->closed) {
+                            // std::cout << "worker " << thread_count << " closed" << std::endl;
+                            return;
+                        }
+                        // std::cout << "worker " << thread_count << " waiting for notify" << std::endl;
+                        this->cv.wait(lock);
                     }
+                    // std::cout << "worker " << thread_count << " get a task" << std::endl;
+                    auto task = this->tasks.front();
+                    this->tasks.pop_front();
+                    lock.unlock();
+                    task();
+                    // std::cout << "worker " << thread_count << " finished task" << std::endl;
+                    lock.lock();
                 }
             }
         );
     }
-    
 }
 
 
@@ -59,7 +71,7 @@ auto ThreadPool::enqueue(F&& f, Args&& ... args)
         std::unique_lock<std::mutex> lock(task_mutex);
         if (!closed) {
             tasks.emplace_back([task]{ (*task)();});
-            cv.notify_all();
+            cv.notify_one();
         }
     }
 
@@ -70,8 +82,9 @@ ThreadPool::~ThreadPool() {
     {
         std::unique_lock<std::mutex> lock(task_mutex);
         closed = true;
-        for (auto && worker : workers) {
-            worker.join();
-        }
-    } // unlock
+    }
+    cv.notify_all();
+    for (auto && worker : workers) {
+        worker.join();
+    }
 }
